@@ -17,7 +17,7 @@ include("optimizer/gradient_descent.jl")
 
 # ── Public API ────────────────────────────────────────────────
 # Lattice
-export Lattice1D
+export AbstractLattice, GeneralLattice, Lattice1D, Lattice2D
 
 # System
 export System

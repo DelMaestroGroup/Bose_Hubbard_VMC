@@ -16,17 +16,24 @@ function parse_commandline()
 
     @add_arg_table s begin
         "--dimension", "-D"
-            help = "Lattice dimension (1D only currently)"
+            help = "Lattice dimension (1 = chain, 2 = square; other geometries via Pigsfli)"
             arg_type = Int
             required = true
             default = 1
             dest_name = "D"
 
         "--length", "-L"
-            help = "Size of 1D lattice"
+            help = "Sites along axis 1 (chain length, or square Lx)"
             arg_type = Int
             required = true
             dest_name = "L"
+
+        "--Ly"
+            help = "Sites along axis 2 for a 2D square lattice (defaults to L)"
+            arg_type = Int
+            required = false
+            default = nothing
+            dest_name = "Ly"
 
         "--particle-number", "-N"
             help = "Total number of particles"
@@ -173,8 +180,16 @@ function parse_commandline()
         error("Please input a non-zero particle number")
     end
 
+    # Empty vr_init ⇒ let main() default it to zeros(lattice.n_shells) once the
+    # lattice (and hence the shell count) is known; a supplied string is parsed here.
     if args["vr_init"] == ""
-        args["vr_init"] = zeros(fld(args["L"], 2) + 1)
+        args["vr_init"] = Float64[]
+    else
+        args["vr_init"] = [parse(Float64, strip(x)) for x in split(args["vr_init"], ',')]
+    end
+
+    if args["Ly"] === nothing
+        args["Ly"] = args["L"]
     end
 
     if args["n_max"] == -1
@@ -326,19 +341,20 @@ function write_gutzwiller_parameter(
 end
 
 
+# Write the optimized Jastrow potentials, one row per displacement shell in the
+# canonical shell order. Columns: shell_index  <displacement key…>  v. Pigsfli's
+# loader reads the LAST column (v), in this order, and pairs it with its own
+# pair_shell (built identically), so the ordering can't drift between the sides.
 function write_jastrow_potentials(
     filepath::String,
-    vr::Vector{Float64}
+    vr::Vector{Float64},
+    lattice
 )
-
-    Rmax = length(vr) - 1
-
     open(filepath, "w") do io
-
-        println(io, "# r   v_r")
-
-        for r in 0:Rmax
-            println(io, "$(r) $(vr[r + 1])")
+        println(io, "# shell   displacement_key...   v")
+        for s in 1:length(vr)
+            key = lattice.shell_reps[s]
+            println(io, "$(s) $(join(key, " ")) $(vr[s])")
         end
     end
 end
@@ -463,7 +479,12 @@ function main()
     # Construct system
     # ========================================================
 
-    lattice = Lattice1D(L)
+    # Standalone CLI supports the hypercubic geometries (1D chain / 2D square).
+    # Non-cubic lattices (triangular/honeycomb/kagome/custom) are optimized through
+    # Pigsfli, which builds the GeneralLattice from its LatticeModels geometry.
+    lattice = D == 1 ? Lattice1D(L) :
+              D == 2 ? Lattice2D(L, args["Ly"]) :
+              error("Standalone CLI supports D = 1 or 2 (got $D); use Pigsfli for other lattices.")
 
     sys = System(t, U, N, lattice)
 
@@ -480,9 +501,11 @@ function main()
 
     elseif trial_state == "jastrow"
 
-        wavefunction_init = JastrowWavefunction(
-            copy(args["vr_init"])
-        )
+        # One coefficient per displacement shell (default all-zeros unless overridden).
+        vr0 = isempty(args["vr_init"]) ? zeros(lattice.n_shells) : copy(args["vr_init"])
+        length(vr0) == lattice.n_shells ||
+            error("--jastrow-potentials has $(length(vr0)) values but the lattice has $(lattice.n_shells) shells.")
+        wavefunction_init = JastrowWavefunction(vr0)
 
     else
 
@@ -578,7 +601,8 @@ function main()
 
             write_jastrow_potentials(
                 vr_file,
-                wavefunction_opt.vr
+                wavefunction_opt.vr,
+                lattice
             )
 
         elseif wavefunction_opt isa GutzwillerWavefunction

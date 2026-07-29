@@ -75,13 +75,13 @@ function MC_integration(sys::System,
 
     L = length(sys.lattice.neighbors)
     N = sys.N
-    Rmax = fld(L, 2)
+    n_corr = sys.lattice.n_shells        # density-density correlation is per displacement shell
 
     walkers = [ground_state_configuration(N, L, n_max) for _ in 1:num_walkers]
 
     # ── Block accumulators ────────────────────────────────────────────────────
     block_sum_E = 0.0;  block_sum_T = 0.0;  block_sum_V = 0.0
-    block_sum_density_density_corr = zeros(Float64, Rmax)
+    block_sum_density_density_corr = zeros(Float64, n_corr)
     block_sum_g = 0.0;  block_count = 0
 
     block_means_E  = Float64[];  block_means_T = Float64[]
@@ -123,7 +123,7 @@ function MC_integration(sys::System,
             # ── Measurements ─────────────────────────────────────────────────
             if step >= num_equil_steps
                 E, T, V = local_energy_gutzwiller(n, wf, sys, n_max)
-                density_density_corr = local_density_density_correlation(n)
+                density_density_corr = local_density_density_correlation(n, sys.lattice)
                 if isfinite(E)
                     block_sum_E += E;  block_sum_T += T;  block_sum_V += V
                     block_sum_density_density_corr .+= density_density_corr
@@ -203,13 +203,15 @@ function MC_integration(sys::System,
     L  = length(sys.lattice.neighbors)
     N  = sys.N
     Nv = length(wf.vr)
+    n_corr = sys.lattice.n_shells
+    Nv == n_corr || error("Jastrow vr has $Nv entries but the lattice has $n_corr displacement shells.")
 
     walkers = [initialize_walker(ground_state_configuration(N, L, n_max), wf)
                for _ in 1:num_walkers]
 
     # ── Block accumulators ────────────────────────────────────────────────────
     block_sum_E  = 0.0;  block_sum_T  = 0.0;  block_sum_V  = 0.0
-    block_sum_density_density_corr = zeros(Float64, fld(L,2))
+    block_sum_density_density_corr = zeros(Float64, n_corr)
     block_sum_O  = zeros(Float64, Nv)
     block_sum_OO = zeros(Float64, Nv, Nv)
     block_sum_EO = zeros(Float64, Nv)
@@ -225,7 +227,7 @@ function MC_integration(sys::System,
     used_sum_O  = zeros(Float64, Nv)
     used_sum_OO = zeros(Float64, Nv, Nv)
     used_sum_EO = zeros(Float64, Nv)
-    used_sum_density_density_corr = zeros(Float64, fld(L,2))
+    used_sum_density_density_corr = zeros(Float64, n_corr)
     num_samples_used = 0;  num_accepted_moves = 0;  num_failed_moves = 0
 
     # ── Monte Carlo loop ──────────────────────────────────────────────────────
@@ -244,8 +246,8 @@ function MC_integration(sys::System,
 
             # If move is physical, calculate acceptance ratio
             if move_valid && from != to
-                Δlogpsi = compute_delta_logpsi_realspace(n, from, to, wf)
-                log_ratio = log_acceptance_ratio_realspace_jastrow(n, from, to, wf)
+                Δlogpsi = compute_delta_logpsi_realspace(n, from, to, wf, sys.lattice)
+                log_ratio = log_acceptance_ratio_realspace_jastrow(n, from, to, wf, sys.lattice)
 
                 if isfinite(log_ratio) && log(rand()) < log_ratio
                     n[from]  -= 1;  n[to] += 1
@@ -261,12 +263,12 @@ function MC_integration(sys::System,
             if step > num_equil_steps
                 E, T, V = local_energy_jastrow(w.n, sys, n_max, wf)
                 if final_run
-                    density_density_corr = local_density_density_correlation(w.n)
+                    density_density_corr = local_density_density_correlation(w.n, sys.lattice)
                 else
-                    density_density_corr = zeros(Float64, fld(L,2))
+                    density_density_corr = zeros(Float64, n_corr)
                 end
                 if isfinite(E)
-                    O = logpsi_derivatives_realspace(w.n)
+                    O = logpsi_derivatives_realspace(w.n, sys.lattice)
 
                     block_sum_E  += E;  block_sum_T  += T;  block_sum_V  += V
                     block_sum_density_density_corr  .+= density_density_corr

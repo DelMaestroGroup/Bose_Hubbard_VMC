@@ -47,31 +47,59 @@ end
 #=
 Minimizes the variational energy using the Stochastic Reconfiguration (SR)
 update rule:
-    Δv = η · (S + λI)⁻¹ · g
+    Δv = η · (S + λ_eff·I)⁻¹ · g ,   λ_eff = λ · tr(S)/dim
 
 where g is the energy gradient and S is the quantum geometric tensor (metric).
 Works for any Wavefunction subtype via flatten_params / unflatten_params dispatch.
+
+Two properties make the DEFAULT settings converge across arbitrary geometries,
+sizes, and fillings without per-system retuning (see below for why the naive
+absolute-`λ`/absolute-`step_tol` form did not):
+
+  * `λ` is applied RELATIVE to the metric scale, `λ_eff = λ·tr(S)/dim` (dim = #
+    parameters). The scale of S grows with system size and filling (its entries
+    are variances of O ~ Σ nᵢnⱼ), so a bare absolute `λ` under-regularizes large
+    systems; the relative form fixes the same fractional shift everywhere. This
+    also tames the EXACT null mode every canonical Jastrow has: because the
+    displacement shells tile all ordered pairs incl. on-site, Σₛ Oₛ = −½N² is
+    constant at fixed N, so "shift every vₛ by a constant" is a zero-curvature
+    normalization gauge (an exact 0-eigenvector of S). It does not change the
+    normalized state, but with too small a shift its gradient noise is amplified
+    ∝ 1/λ_eff and the parameters wander forever.
+
+  * convergence is governed by the SCALE-FREE energy-resolution test: stop once
+    the SR-predicted energy drop `predicted_drop = η_ref·gᵀ(S+λ_eff·I)⁻¹g` falls
+    below `z_energy·(energy SEM)`. Both sides carry the same MC-noise scaling, so
+    one `z_energy` transfers across systems. This is exactly a state-space "we've
+    stopped moving" test too, since the Fubini–Study step length satisfies
+    `sr_step = √(η_ref·predicted_drop)` (S annihilates the gauge mode, so sr_step
+    also ignores harmless wandering along it). The two are redundant, so the old
+    ABSOLUTE step threshold — the only non-transferable knob — is off by default.
 
 Convergence is assessed using a patience counter: the optimizer must satisfy
 one of the convergence criteria for `patience` consecutive iterations before
 stopping. Criteria:
   1. All gradient components are statistically indistinguishable from zero.
-  2. The predicted energy drop is smaller than the energy resolution AND the
-     RMS parameter step is smaller than step_tol.
+  2. The predicted energy drop is smaller than the energy resolution (z_energy·SEM),
+     AND — only if the optional `step_tol` is set finite — the Fubini–Study step
+     length is below it. With the default `step_tol = Inf` criterion 2 is purely
+     the energy-resolution test.
 
 The reference learning rate η_ref is used only for convergence diagnostics
-(predicted drop and RMS step), decoupling the stopping condition from the
+(predicted drop and FS step), decoupling the stopping condition from the
 choice of η.
 
 kwargs
 ------
 η              : learning rate
-λ              : diagonal regularization of S
+λ              : RELATIVE diagonal regularization; the shift is λ·tr(S)/dim
 max_step       : hard clip on ||Δv||; useful for Gutzwiller to avoid large
                  steps early in optimization (set to Inf to disable)
 z_grad         : SNR threshold for a gradient component to be "resolved"
-z_energy       : multiplier on energy SEM for predicted-drop convergence test
-step_tol       : RMS step threshold (reference η) for step-size convergence test
+z_energy       : multiplier on energy SEM for the predicted-drop convergence test
+step_tol       : OPTIONAL Fubini–Study step-length cap; default Inf leaves the
+                 scale-free energy test in charge. Set finite (dimensionless,
+                 size-independent) to also require the state to have stopped moving.
 min_iters      : minimum iterations before convergence is checked
 patience       : consecutive convergence hits required to stop
 max_iters      : hard iteration cap
@@ -80,15 +108,15 @@ function optimize_SR(sys::System,
                      wf::Wavefunction,
                      n_max::Int;
                      η               ::Float64 = 0.05,
-                     λ               ::Float64 = 1e-3,
+                     λ               ::Float64 = 2e-2,   # RELATIVE: shift = λ·tr(S)/dim
                      max_step        ::Float64 = Inf,
                      num_walkers     ::Int     = 200,
                      num_MC_steps    ::Int     = 30000,
                      num_equil_steps ::Int     = 5000,
                      block_size      ::Int     = 200,
                      z_grad          ::Float64 = 1.0,
-                     z_energy        ::Float64 = 1.0,
-                     step_tol        ::Float64 = 1e-4,
+                     z_energy        ::Float64 = 2.0,
+                     step_tol        ::Float64 = Inf,    # optional FS step-length cap; Inf ⇒ energy-governed
                      min_iters       ::Int     = 5,
                      patience        ::Int     = 2,
                      max_iters       ::Int     = 200)
@@ -119,8 +147,27 @@ function optimize_SR(sys::System,
             break
         end
 
+        # ── Adaptive step control (overshoot backtracking) ────────────────────
+        # A fixed η that suits a small lattice can be too large for a larger /
+        # higher-filling one, where it overshoots the minimum and the energy
+        # oscillates (period-2) instead of settling. If the LAST step raised the
+        # energy by a GROSS amount, halve η so the optimizer converges. The trigger
+        # requires the ascent to be both statistically significant AND a sizeable
+        # fraction of the energy scale, so ordinary flat-region MC wiggles (a few σ,
+        # ≪1% of |E|) leave η — and the fast small-system convergence — untouched.
+        if prev_E !== nothing
+            ascent = E - prev_E
+            if ascent > z_energy * sqrt(err^2 + prev_err^2) && ascent > 0.01 * abs(E)
+                η = max(0.5 * η, 1e-4)
+            end
+        end
+
         # ── Natural gradient step ─────────────────────────────────────────────
-        direction = (S + λ * I) \ g
+        # Relative diagonal shift: λ_eff scales with the metric so one λ works
+        # across system sizes/fillings and regularizes the fixed-N gauge null mode
+        # (see the header). Floored to keep the linear solve non-singular.
+        λ_eff     = max(λ * tr(S) / length(g), 1e-10)
+        direction = (S + λ_eff * I) \ g
         Δv        = η     .* direction
         Δv_ref    = η_ref .* direction
 
@@ -133,7 +180,11 @@ function optimize_SR(sys::System,
         snr            = snr_vector(g, SE_g; zero_tol = 1e-16)
         num_resolved   = count(x -> x > z_grad, snr)
         predicted_drop = dot(g, Δv_ref)
-        rms_step       = norm(Δv_ref) / sqrt(length(Δv_ref))
+        rms_step       = norm(Δv_ref) / sqrt(length(Δv_ref))   # raw step (diagnostic only)
+        # Fubini–Study step length: distance moved in state space. S annihilates
+        # the gauge null mode, so this ignores harmless wandering along it and is
+        # dimensionless/size-independent — the quantity the stop test uses.
+        sr_step        = sqrt(max(dot(Δv_ref, S * Δv_ref), 0.0))
 
         if predicted_drop < 0.0
             @warn "SR step is not a descent direction at iteration $iter." predicted_drop
@@ -146,6 +197,7 @@ function optimize_SR(sys::System,
         println("  Gradient norm    = $(round(norm(g), digits=6))")
         println("  Max SNR          = $(round(maximum(snr), digits=4))")
         println("  Resolved comps   = $num_resolved / $(length(g))")
+        println("  FS step          = $(round(sr_step, digits=6))  (λ_eff=$(round(λ_eff, sigdigits=3)))")
 
         if prev_E !== nothing
             ΔE     = abs(E - prev_E)
@@ -161,13 +213,14 @@ function optimize_SR(sys::System,
             gradient       = copy(g),
             snr            = copy(snr),
             predicted_drop = predicted_drop,
-            rms_step       = rms_step
+            rms_step       = rms_step,
+            sr_step        = sr_step
         ))
 
         # ── Convergence test ──────────────────────────────────────────────────
         gradient_zero     = num_resolved == 0
         energy_unresolved = predicted_drop <= z_energy * err
-        step_small        = rms_step <= step_tol
+        step_small        = sr_step <= step_tol
 
         converged_now = iter >= min_iters &&
                         (gradient_zero || (energy_unresolved && step_small))

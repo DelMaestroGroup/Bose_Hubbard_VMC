@@ -30,7 +30,10 @@ end
 
 # ── Jastrow ───────────────────────────────────────────────────────────────────
 
-# Store real-space Jastrow variational parameters/Jastrow potentials (v_r)
+# Store real-space Jastrow variational parameters/Jastrow potentials (v_r).
+# One coefficient per lattice displacement shell (see GeneralLattice.pair_shell):
+# length == lattice.n_shells, ordered as GeneralLattice.shell_reps. On a 1D chain
+# this reduces to the ⌊L/2⌋+1 ring-distance coefficients.
 struct JastrowWavefunction{T <: Real} <: Wavefunction
-    vr::Vector{T}    # fld(L, 2) + 1 real-space coefficients (translational invariance)
+    vr::Vector{T}
 end

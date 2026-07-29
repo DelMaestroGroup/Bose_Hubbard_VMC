@@ -23,19 +23,14 @@ Output: particle correlation function for given configuration
 Author: Will Mallah
 Last Updated: 07/01/2026
 =#
-function local_density_density_correlation(n::Vector{Int})
-    L = length(n)
-    Rmax = fld(L, 2)
-    C = zeros(Float64, Rmax)
-
-    for d in 1:Rmax
-        for i in 1:L
-            j = mod1(i + d, L)
-            C[d] += n[i] * n[j]
-        end
+function local_density_density_correlation(n::Vector{Int}, lattice)
+    ps = lattice.pair_shell
+    L  = length(n)
+    C  = zeros(Float64, lattice.n_shells)
+    @inbounds for i in 1:L, j in 1:L
+        C[ps[i, j]] += n[i] * n[j]
     end
-
-    return C / L
+    return C ./ L      # per ordered-pair displacement shell (shell 1 = on-site Σn_i²)
 end
 
 
@@ -120,13 +115,13 @@ function local_kinetic_energy_jastrow(
             if j > i
                 # hop j -> i gives a_i^† a_j
                 if n[j] > 0 && n[i] < n_max
-                    Δlogpsi = compute_delta_logpsi_realspace(n, j, i, ψ)
+                    Δlogpsi = compute_delta_logpsi_realspace(n, j, i, ψ, lattice)
                     Ekin -= t * n[j] * exp(Δlogpsi)
                 end
 
                 # hop i -> j gives a_j^† a_i
                 if n[i] > 0 && n[j] < n_max
-                    Δlogpsi = compute_delta_logpsi_realspace(n, i, j, ψ)
+                    Δlogpsi = compute_delta_logpsi_realspace(n, i, j, ψ, lattice)
                     Ekin -= t * n[i] * exp(Δlogpsi)
                 end
             end
@@ -166,36 +161,26 @@ Output: GutzwillerWavefunction struct
 Author: Will Mallah
 Last Updated: 06/09/2026
 =#
-function logpsi_derivatives_realspace(n::Vector{Int})
-    L = length(n)
-    Rmax = fld(L, 2)
-    O = zeros(Float64, Rmax + 1)
+#=
+Anisotropic real-space Jastrow convention (general lattice):
 
-    for idx in 1:(Rmax + 1)
-        R = idx - 1
+    logψ(n) = -½ ∑_{ordered (i,j)} v[shell(i,j)] n_i n_j ,
 
-        # prefactor matches the symmetric Jastrow convention
-        # logψ = -∑_R prefactor(R) * v_R * ∑_i n_i n_{i+R}
-        #
-        # R = 0 gets 1/2 from the usual symmetric density-density form.
-        # For even L, R = L/2 also gets 1/2 because each opposite-site pair
-        # appears twice in ∑_i n_i n_{i+R}.
-        prefactor = 1.0
-        if R == 0
-            prefactor = 0.5
-        elseif iseven(L) && R == Rmax
-            prefactor= 0.5
-        end
+summed over all ordered pairs including i=j (shell 1 = on-site r=0). The uniform
+½-over-ordered-pairs form reproduces the old 1D per-R prefactors exactly: an
+off-diagonal unordered pair is counted twice (as (i,j) and (j,i), same shell by
+the ±-fold), and the self / opposite-site terms fall out with the right weight.
 
-        SR = 0.0
-        for i in 1:L
-            j = mod1(i + R, L)
-            SR += n[i] * n[j]
-        end
-
-        O[idx] = -prefactor * SR
+O[s] = ∂ logψ / ∂ v[s] = -½ ∑_{(i,j): shell=s} n_i n_j  (used by the SR gradient/metric).
+=#
+function logpsi_derivatives_realspace(n::Vector{Int}, lattice)
+    ps = lattice.pair_shell
+    L  = length(n)
+    O  = zeros(Float64, lattice.n_shells)
+    @inbounds for i in 1:L, j in 1:L
+        O[ps[i, j]] += n[i] * n[j]
     end
-
+    O .*= -0.5
     return O
 end
 
@@ -207,85 +192,36 @@ Output: change in the log of the Jastrow exponetial piece of the wavefunction
 Author: Will Mallah
 Last Updated: 06/09/2026
 =#
+#=
+Change in logψ for a single-particle hop `from_site → to_site` (one boson leaves
+`from`, arrives at `to`) under the anisotropic Jastrow. With logψ = -½ ∑ v[shell] n_i n_j
+and δ_a=-1 (from), δ_b=+1 (to), only sites a,b change occupation, giving the O(L) result
+
+    Δlogψ = (h_a − h_b) − v[self] + v[shell(a,b)] ,     h_i = ∑_j v[shell(i,j)] n_j ,
+
+where `self` is shell 1 (the on-site r=0 term). Reduces to the old 1D expression on a chain.
+=#
 function compute_delta_logpsi_realspace(
     n::Vector{Int},
     from_site::Int,
     to_site::Int,
-    ψ::JastrowWavefunction
+    ψ::JastrowWavefunction,
+    lattice
 )
-    # Extract Jastrow potentials from wavefunction struct
     vr = ψ.vr
-    # Extract the system size from the length of the configuration vector
-    L = length(n)
-    # Define the maximum difference between two sites on our 1D periodic lattice
-    Rmax = fld(L, 2)
+    ps = lattice.pair_shell
+    L  = length(n)
 
-    # Assert quantities to ensure physical laws
-    @assert 1 <= from_site <= L
-    @assert 1 <= to_site <= L
-    @assert from_site != to_site
-    @assert n[from_site] > 0
-    # Short-hand notation
     a = from_site
     b = to_site
 
-    # Initialize the quantitiy we want to compute
-    Δlogpsi = 0.0
-
-    # Sum over site distances using Julia indexing (idx = 1 --> R = 0, idx = Rmax + 1 --> R = Rmax)
-    for idx in 1:(Rmax + 1)
-        R = idx - 1
-        
-        # Symmetric real-space Jastrow convention:
-        # logψ = -∑_R c_R v_R ∑_i n_i n_{i+R}
-        #
-        # R = 0 gets c_R = 1/2 from the usual symmetric density-density form.
-        # For even L, R = L/2 also gets c_R = 1/2 because opposite-site
-        # pairs are counted twice in ∑_i n_i n_{i+R}.
-        prefactor = 1.0
-        if R == 0
-            prefactor = 0.5
-        elseif iseven(L) && R == Rmax
-            prefactor= 0.5
-        end
-
-        # The "weights" in the sum we are computing are the Jastrow potentials
-        weight = prefactor * vr[idx]
-
-        # 
-        affected_i = unique((
-            a,
-            b,
-            mod1(a - R, L),
-            mod1(b - R, L),
-        ))
-
-        # Initialize old and new operator values
-        old_local = 0.0
-        new_local = 0.0
-
-        # Only sum over sites which are affected by the hopping move (won't cancel exactly in the sum)
-        for i in affected_i
-            # Distance from i site
-            j = mod1(i + R, L)
-
-            # Asssign old operator values
-            ni_old = n[i]
-            nj_old = n[j]
-
-            # Assign new operators from hopping move
-            ni_new = ni_old + (i == b ? 1 : 0) - (i == a ? 1 : 0)
-            nj_new = nj_old + (j == b ? 1 : 0) - (j == a ? 1 : 0)
-
-            # Sum non-cancelling terms
-            old_local += ni_old * nj_old
-            new_local += ni_new * nj_new
-        end
-
-        # Sum Jastrow part of ratio
-        ΔSR = (new_local - old_local)
-        Δlogpsi -= weight * ΔSR
+    h_a = 0.0
+    h_b = 0.0
+    @inbounds for j in 1:L
+        h_a += vr[ps[a, j]] * n[j]
+        h_b += vr[ps[b, j]] * n[j]
     end
+    v_self = vr[ps[a, a]]        # shell 1 (on-site / r = 0)
 
-    return Δlogpsi
+    return (h_a - h_b) - v_self + vr[ps[a, b]]
 end
