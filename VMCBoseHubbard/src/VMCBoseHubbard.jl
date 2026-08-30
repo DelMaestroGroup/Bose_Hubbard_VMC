@@ -20,7 +20,7 @@ include("optimizer/gradient_descent.jl")
 export AbstractLattice, GeneralLattice, Lattice1D, Lattice2D
 
 # System
-export System
+export System, hop_amplitude
 
 # Wavefunction
 export GutzwillerWavefunction, JastrowWavefunction

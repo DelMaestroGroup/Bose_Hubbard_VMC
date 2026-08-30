@@ -44,7 +44,7 @@ Last Updated: 06/09/2026
 =#
 function local_kinetic_energy_gutzwiller(
     n::Vector{Int},
-    t::Float64,
+    t,
     n_max::Int,
     ψ::GutzwillerWavefunction,
     lattice
@@ -56,16 +56,17 @@ function local_kinetic_energy_gutzwiller(
     for i in 1:L
         for j in lattice.neighbors[i]
             if j > i
-                # hop j → i
+                # hop j → i.  The amplitude is a property of the BOND, so both
+                # directions read t[i,j]; a real Bose-Hubbard t is symmetric.
                 if n[j] > 0 && n[i] < n_max
                     log_R = (log_f[n[i] + 2] + log_f[n[j]]) - (log_f[n[i] + 1] + log_f[n[j] + 1])
-                    E_kin -= t * sqrt((n[i] + 1) * n[j]) * exp(log_R)
+                    E_kin -= hop_amplitude(t, i, j) * sqrt((n[i] + 1) * n[j]) * exp(log_R)
                 end
 
                 # hop i → j
                 if n[i] > 0 && n[j] < n_max
                     log_R = (log_f[n[j] + 2] + log_f[n[i]]) - (log_f[n[j] + 1] + log_f[n[i] + 1])
-                    E_kin -= t * sqrt((n[j] + 1) * n[i]) * exp(log_R)
+                    E_kin -= hop_amplitude(t, i, j) * sqrt((n[j] + 1) * n[i]) * exp(log_R)
                 end
             end
         end
@@ -102,7 +103,7 @@ Last Updated: 06/09/2026
 =#
 function local_kinetic_energy_jastrow(
     n::Vector{Int},
-    t::Float64,
+    t,
     n_max::Int,
     ψ::JastrowWavefunction,
     lattice
@@ -116,13 +117,13 @@ function local_kinetic_energy_jastrow(
                 # hop j -> i gives a_i^† a_j
                 if n[j] > 0 && n[i] < n_max
                     Δlogpsi = compute_delta_logpsi_realspace(n, j, i, ψ, lattice)
-                    Ekin -= t * n[j] * exp(Δlogpsi)
+                    Ekin -= hop_amplitude(t, i, j) * n[j] * exp(Δlogpsi)
                 end
 
                 # hop i -> j gives a_j^† a_i
                 if n[i] > 0 && n[j] < n_max
                     Δlogpsi = compute_delta_logpsi_realspace(n, i, j, ψ, lattice)
-                    Ekin -= t * n[i] * exp(Δlogpsi)
+                    Ekin -= hop_amplitude(t, i, j) * n[i] * exp(Δlogpsi)
                 end
             end
         end
