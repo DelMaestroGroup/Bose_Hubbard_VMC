@@ -222,7 +222,8 @@ function compute_delta_logpsi_realspace(
         h_a += vr[ps[a, j]] * n[j]
         h_b += vr[ps[b, j]] * n[j]
     end
-    v_self = vr[ps[a, a]]        # shell 1 (on-site / r = 0)
-
-    return (h_a - h_b) - v_self + vr[ps[a, b]]
+    # The hop changes -½ Σ_ij v_ij n_i n_j by (h_b - h_a) + (v_aa + v_bb)/2 - v_ab with
+    # h_x = Σ_j v_xj n_j. On a cell with inequivalent sublattices the two on-site
+    # shells v_aa and v_bb are independent parameters, so both enter.
+    return (h_a - h_b) - 0.5 * (vr[ps[a, a]] + vr[ps[b, b]]) + vr[ps[a, b]]
 end
